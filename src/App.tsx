@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Copy, Check } from 'lucide-react';
 
 interface ColorOption {
@@ -11,6 +11,13 @@ interface ColorOption {
 interface StyleOption {
   name: string;
   code: string;
+}
+
+interface TextSegment {
+  text: string;
+  foreground: string | null;
+  background: string | null;
+  styles: string[];
 }
 
 const foregroundColors: ColorOption[] = [
@@ -42,36 +49,174 @@ const textStyles: StyleOption[] = [
 
 function App() {
   const [inputText, setInputText] = useState('');
+  const [segments, setSegments] = useState<TextSegment[]>([]);
   const [selectedForeground, setSelectedForeground] = useState<ColorOption | null>(null);
   const [selectedBackground, setSelectedBackground] = useState<ColorOption | null>(null);
   const [selectedStyles, setSelectedStyles] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
+  const [selectionStart, setSelectionStart] = useState<number | null>(null);
+  const [selectionEnd, setSelectionEnd] = useState<number | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (segments.length === 0 && inputText) {
+      setSegments([{
+        text: inputText,
+        foreground: null,
+        background: null,
+        styles: []
+      }]);
+    }
+  }, [inputText, segments.length]);
+
+  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const newText = e.target.value;
+    setInputText(newText);
+
+    if (segments.length === 0 || (segments.length === 1 && !segments[0].foreground && !segments[0].background && segments[0].styles.length === 0)) {
+      setSegments([{
+        text: newText,
+        foreground: null,
+        background: null,
+        styles: []
+      }]);
+    } else {
+      const totalCurrentLength = segments.reduce((sum, seg) => sum + seg.text.length, 0);
+      const diff = newText.length - totalCurrentLength;
+
+      if (diff > 0) {
+        const lastSegment = segments[segments.length - 1];
+        const updatedSegments = [...segments];
+        updatedSegments[updatedSegments.length - 1] = {
+          ...lastSegment,
+          text: lastSegment.text + newText.slice(totalCurrentLength)
+        };
+        setSegments(updatedSegments);
+      } else if (diff < 0) {
+        let remaining = newText.length;
+        const updatedSegments: TextSegment[] = [];
+
+        for (const seg of segments) {
+          if (remaining <= 0) break;
+          if (remaining >= seg.text.length) {
+            updatedSegments.push(seg);
+            remaining -= seg.text.length;
+          } else {
+            updatedSegments.push({
+              ...seg,
+              text: seg.text.slice(0, remaining)
+            });
+            remaining = 0;
+          }
+        }
+        setSegments(updatedSegments);
+      }
+    }
+  };
+
+  const handleTextSelect = () => {
+    if (textareaRef.current) {
+      const start = textareaRef.current.selectionStart;
+      const end = textareaRef.current.selectionEnd;
+
+      if (start !== end) {
+        setSelectionStart(start);
+        setSelectionEnd(end);
+      } else {
+        setSelectionStart(null);
+        setSelectionEnd(null);
+      }
+    }
+  };
+
+  const applyFormattingToSelection = () => {
+    if (selectionStart === null || selectionEnd === null || selectionStart === selectionEnd) {
+      return;
+    }
+
+    const selectedText = inputText.slice(selectionStart, selectionEnd);
+    const newSegments: TextSegment[] = [];
+
+    let currentPos = 0;
+
+    for (const segment of segments) {
+      const segmentEnd = currentPos + segment.text.length;
+
+      if (segmentEnd <= selectionStart || currentPos >= selectionEnd) {
+        newSegments.push(segment);
+      } else {
+        if (currentPos < selectionStart) {
+          newSegments.push({
+            ...segment,
+            text: segment.text.slice(0, selectionStart - currentPos)
+          });
+        }
+
+        const overlapStart = Math.max(0, selectionStart - currentPos);
+        const overlapEnd = Math.min(segment.text.length, selectionEnd - currentPos);
+        const overlapText = segment.text.slice(overlapStart, overlapEnd);
+
+        if (overlapText) {
+          newSegments.push({
+            text: overlapText,
+            foreground: selectedForeground?.code || segment.foreground,
+            background: selectedBackground?.code || segment.background,
+            styles: selectedStyles.length > 0 ? selectedStyles : segment.styles
+          });
+        }
+
+        if (segmentEnd > selectionEnd) {
+          newSegments.push({
+            ...segment,
+            text: segment.text.slice(selectionEnd - currentPos)
+          });
+        }
+      }
+
+      currentPos = segmentEnd;
+    }
+
+    setSegments(newSegments);
+    setSelectionStart(null);
+    setSelectionEnd(null);
+
+    if (textareaRef.current) {
+      textareaRef.current.selectionStart = selectionEnd;
+      textareaRef.current.selectionEnd = selectionEnd;
+    }
+  };
 
   const generateColoredText = (): string => {
-    if (!inputText.trim()) return '';
+    if (!inputText.trim() || segments.length === 0) return '';
 
-    const codes: string[] = [];
+    let result = '```ansi\n';
 
-    if (selectedStyles.length > 0) {
-      codes.push(...selectedStyles);
+    for (const segment of segments) {
+      if (!segment.text) continue;
+
+      const codes: string[] = [];
+
+      if (segment.styles.length > 0) {
+        codes.push(...segment.styles);
+      }
+
+      if (segment.foreground) {
+        codes.push(segment.foreground);
+      }
+
+      if (segment.background) {
+        codes.push(segment.background);
+      }
+
+      if (codes.length > 0) {
+        result += `\u001b[${codes.join(';')}m${segment.text}\u001b[0m`;
+      } else {
+        result += segment.text;
+      }
     }
 
-    if (selectedForeground) {
-      codes.push(selectedForeground.code);
-    }
-
-    if (selectedBackground) {
-      codes.push(selectedBackground.code);
-    }
-
-    if (codes.length === 0) {
-      return `\`\`\`ansi\n${inputText}\n\`\`\``;
-    }
-
-    const ansiCode = `\u001b[${codes.join(';')}m`;
-    const resetCode = '\u001b[0m';
-
-    return `\`\`\`ansi\n${ansiCode}${inputText}${resetCode}\n\`\`\``;
+    result += '\n```';
+    return result;
   };
 
   const outputText = generateColoredText();
@@ -91,10 +236,18 @@ function App() {
   };
 
   const clearAll = () => {
+    setSegments([{
+      text: inputText,
+      foreground: null,
+      background: null,
+      styles: []
+    }]);
     setSelectedForeground(null);
     setSelectedBackground(null);
     setSelectedStyles([]);
   };
+
+  const hasSelection = selectionStart !== null && selectionEnd !== null && selectionStart !== selectionEnd;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-lime-200 via-yellow-100 to-pink-200 p-2">
@@ -116,20 +269,40 @@ function App() {
                 ✏️ Type ur text here!!!
               </label>
               <textarea
+                ref={textareaRef}
                 value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
+                onChange={handleTextChange}
+                onSelect={handleTextSelect}
+                onMouseUp={handleTextSelect}
+                onKeyUp={handleTextSelect}
                 placeholder="type something cool..."
                 className="w-full h-24 px-2 py-2 bg-yellow-100 border-4 border-blue-500 text-black text-lg"
                 style={{ fontFamily: 'Comic Sans MS, cursive' }}
               />
-              {(selectedForeground || selectedBackground || selectedStyles.length > 0) && (
-                <button
-                  onClick={clearAll}
-                  className="mt-2 px-3 py-1 bg-red-400 border-2 border-black text-sm font-bold hover:bg-red-500"
-                  style={{ fontFamily: 'Comic Sans MS, cursive' }}
-                >
-                  CLEAR ALL!!!
-                </button>
+              <div className="mt-2 flex gap-2">
+                {hasSelection && (
+                  <button
+                    onClick={applyFormattingToSelection}
+                    className="px-3 py-1 bg-green-400 border-2 border-black text-sm font-bold hover:bg-green-500 animate-pulse"
+                    style={{ fontFamily: 'Comic Sans MS, cursive' }}
+                  >
+                    APPLY COLOR TO SELECTED TEXT!!!
+                  </button>
+                )}
+                {segments.some(s => s.foreground || s.background || s.styles.length > 0) && (
+                  <button
+                    onClick={clearAll}
+                    className="px-3 py-1 bg-red-400 border-2 border-black text-sm font-bold hover:bg-red-500"
+                    style={{ fontFamily: 'Comic Sans MS, cursive' }}
+                  >
+                    CLEAR ALL!!!
+                  </button>
+                )}
+              </div>
+              {hasSelection && (
+                <p className="mt-2 text-xs text-purple-800 font-bold" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
+                  👆 u selected some text! pick colors below then click apply!!!
+                </p>
               )}
             </div>
 
@@ -300,9 +473,10 @@ function App() {
               </h3>
               <ol className="space-y-1 text-sm font-bold list-decimal list-inside" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
                 <li className="text-blue-600">type ur message in da box</li>
-                <li className="text-red-600">pick if u want bold or underline</li>
-                <li className="text-purple-600">click a text color</li>
-                <li className="text-orange-600">click a background color (optional!)</li>
+                <li className="text-red-600">select some text with ur mouse!!!</li>
+                <li className="text-purple-600">pick colors n styles u want</li>
+                <li className="text-orange-600">click APPLY button!!!</li>
+                <li className="text-pink-600">do it again for other parts of ur text!!</li>
                 <li className="text-green-600">copy the code and paste in discord!!!</li>
               </ol>
               <p className="mt-3 text-xs text-gray-700 font-bold" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
